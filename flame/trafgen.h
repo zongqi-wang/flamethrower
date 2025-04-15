@@ -33,9 +33,11 @@ enum class Protocol {
 struct TrafGenConfig {
     std::vector<Target> target_list;
     unsigned int _current_target{0};
+    unsigned int _current_port_idx{0};
     int family{0};
     std::string bind_ip;
     unsigned int port{53};
+    std::vector<unsigned int> ports = {};
     int r_timeout{3};
     long s_delay{1};
     long batch_count{10};
@@ -49,6 +51,15 @@ struct TrafGenConfig {
         _current_target++;
         if (_current_target >= target_list.size())
             _current_target = 0;
+        return next;
+    }
+
+    const unsigned int next_port() {
+        const unsigned int next = ports[_current_port_idx];
+        _current_port_idx++;
+        if (_current_port_idx >= target_list.size()) {
+            _current_port_idx = 0;
+        }
         return next;
     }
 };

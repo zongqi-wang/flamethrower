@@ -1,10 +1,12 @@
 // Copyright 2017 NSONE, Inc
 
+#include <algorithm>
 #include <iostream>
 #include <iterator>
 #include <map>
 #include <queue>
 #include <sstream>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -62,7 +64,8 @@ static const char USAGE[] =
       -r RECORD        The base record to use as the DNS query for generators [default: test.com]
       -T QTYPE         The query type to use for generators [default: A]
       -f FILE          Read records from FILE, one per row, QNAME TYPE
-      -p PORT          Which port to flame [defaults: 53, 443 for DoH, 853 for DoT]
+      -p PORTS         Which port(s) to flame. Can be a single port, a comma-separated list (e.g., 53,853),
+                       or a range (e.g., 53-55). [defaults: 53 for UDP/TCP, 443 for DoH, 853 for DoT]
       -F FAMILY        Internet family (inet/inet6) [default: inet]
       -P PROTOCOL      Protocol to use (udp/tcp/dot/doh) [default: udp]
       -M HTTPMETHOD    HTTP method to use (POST/GET) when DoH is used [default: GET]
@@ -135,6 +138,62 @@ void parse_flowspec(std::string spec, std::queue<std::pair<uint64_t, uint64_t>> 
     }
 }
 
+std::vector<unsigned int> parse_ports(const std::string &port_spec)
+{
+    std::vector<unsigned int> ports;
+    std::stringstream ss(port_spec);
+    std::string segment;
+
+    while (std::getline(ss, segment, ',')) {
+        size_t hyphen_pos = segment.find('-');
+        if (hyphen_pos == std::string::npos) {
+            // Single port
+            try {
+                long port = std::stol(segment);
+                if (port <= 0 || port > 65535) {
+                    throw std::runtime_error("Port out of range (1-65535): " + segment);
+                }
+                ports.push_back(static_cast<unsigned int>(port));
+            } catch (const std::exception &e) {
+                throw std::runtime_error("Invalid port number: " + segment + " (" + e.what() + ")");
+            }
+        } else {
+            // Port range
+            std::string start_str = segment.substr(0, hyphen_pos);
+            std::string end_str = segment.substr(hyphen_pos + 1);
+            if (start_str.empty() || end_str.empty()) {
+                throw std::runtime_error("Invalid port range format: " + segment);
+            }
+            try {
+                long start_port = std::stol(start_str);
+                long end_port = std::stol(end_str);
+
+                if (start_port <= 0 || start_port > 65535 || end_port <= 0 || end_port > 65535) {
+                    throw std::runtime_error("Port range value out of range (1-65535): " + segment);
+                }
+                if (start_port > end_port) {
+                    throw std::runtime_error("Invalid port range order (start > end): " + segment);
+                }
+                for (long p = start_port; p <= end_port; ++p) {
+                    ports.push_back(static_cast<unsigned int>(p));
+                }
+            } catch (const std::exception &e) {
+                throw std::runtime_error("Invalid port range number: " + segment + " (" + e.what() + ")");
+            }
+        }
+    }
+
+    if (ports.empty()) {
+        throw std::runtime_error("No ports specified or parsed.");
+    }
+
+    // Remove duplicates and sort
+    std::sort(ports.begin(), ports.end());
+    ports.erase(std::unique(ports.begin(), ports.end()), ports.end());
+
+    return ports;
+}
+
 void flow_change(std::queue<std::pair<uint64_t, uint64_t>> qps_flow,
     std::vector<std::shared_ptr<TokenBucket>> rl_list,
     int verbosity,
@@ -157,7 +216,7 @@ void flow_change(std::queue<std::pair<uint64_t, uint64_t>> qps_flow,
         return;
     auto loop = uvw::Loop::getDefault();
     auto qps_timer = loop->resource<uvw::TimerHandle>();
-    qps_timer->on<uvw::TimerEvent>([qps_flow, rl_list, verbosity, c_count](const auto& event, auto& handle) {
+    qps_timer->on<uvw::TimerEvent>([qps_flow, rl_list, verbosity, c_count](const auto &event, auto &handle) {
         handle.stop();
         flow_change(qps_flow, rl_list, verbosity, c_count);
     });
@@ -174,7 +233,7 @@ bool arg_exists(const char *needle, int argc, char *argv[])
     return false;
 }
 
-void setupRoutes(const MetricsMgr* metricsManager, httplib::Server &svr)
+void setupRoutes(const MetricsMgr *metricsManager, httplib::Server &svr)
 {
 
     svr.Get(METRIC_ROUTE, [metricsManager](const httplib::Request &req, httplib::Response &res) {
@@ -187,7 +246,6 @@ void setupRoutes(const MetricsMgr* metricsManager, httplib::Server &svr)
             res.set_content(e.what(), "text/plain");
         }
     });
-
 }
 
 int main(int argc, char *argv[])
@@ -230,8 +288,8 @@ int main(int argc, char *argv[])
 #ifdef DOH_ENABLE
             proto = Protocol::DOH;
 #else
-			std::cerr << "DNS over HTTPS (DoH) support is not enabled" << std::endl;
-			return 1;
+            std::cerr << "DNS over HTTPS (DoH) support is not enabled" << std::endl;
+            return 1;
 #endif
         } else {
             proto = Protocol::TCP;
@@ -249,20 +307,32 @@ int main(int argc, char *argv[])
         return 1;
     }
 
-    if (!args["-p"]) {
-        if (proto == Protocol::DOT)
-            args["-p"] = std::string("853");
+    std::vector<unsigned int> ports;
+    try {
+        if (args["-p"]) {
+            ports = parse_ports(args["-p"].asString());
+        } else {
+            // Set default port based on protocol
+            if (proto == Protocol::DOT)
+                ports.push_back(853);
 #ifdef DOH_ENABLE
-        else if (proto == Protocol::DOH)
-            args["-p"] = std::string("443");
+            else if (proto == Protocol::DOH)
+                ports.push_back(443);
 #endif
-        else
-            args["-p"] = std::string("53");
+            else // UDP or TCP
+                ports.push_back(53);
+            if (args["-v"].asLong() > 1) {
+                std::cout << "Using default port " << ports[0] << " for protocol " << args["-P"].asString() << std::endl;
+            }
+        }
+    } catch (const std::runtime_error &e) {
+        std::cerr << "Error parsing ports: " << e.what() << std::endl;
+        return 1;
     }
 
 #ifdef DOH_ENABLE
     HTTPMethod method{HTTPMethod::GET};
-    if(args["-M"].asString() == "POST") {
+    if (args["-M"].asString() == "POST") {
         method = HTTPMethod::POST;
     }
 #endif
@@ -313,15 +383,17 @@ int main(int argc, char *argv[])
 
     std::vector<Target> target_list;
     auto request = loop->resource<uvw::GetAddrInfoReq>();
+    std::string first_port_str = std::to_string(ports[0]);
+
     for (uint i = 0; i < raw_target_list.size(); i++) {
         uvw::Addr addr;
         struct http_parser_url parsed = {};
         std::string url = raw_target_list[i];
-        if(url.rfind("https://", 0) != 0) {
+        if (url.rfind("https://", 0) != 0) {
             url.insert(0, "https://");
         }
         int ret = http_parser_parse_url(url.c_str(), strlen(url.c_str()), 0, &parsed);
-        if(ret != 0) {
+        if (ret != 0) {
             std::cerr << "could not parse url: " << url << std::endl;
             return 1;
         }
@@ -514,15 +586,14 @@ int main(int argc, char *argv[])
         std::cout << "flaming target(s) [";
         for (uint i = 0; i < 3; i++) {
             std::cout << traf_config->target_list[i].address;
-            if (i == traf_config->target_list.size()-1) {
+            if (i == traf_config->target_list.size() - 1) {
                 break;
-            }
-            else {
+            } else {
                 std::cout << ", ";
             }
         }
         if (traf_config->target_list.size() > 3) {
-            std::cout << "and " << traf_config->target_list.size()-3 << " more";
+            std::cout << "and " << traf_config->target_list.size() - 3 << " more";
         }
         std::cout << "] on port "
                   << args["-p"].asLong()
@@ -534,8 +605,7 @@ int main(int argc, char *argv[])
             std::cout << "query list randomized" << std::endl;
         }
         if (config->rate_limit()) {
-            std::cout << "rate limit @ " << config->rate_limit() << " QPS (" << config->rate_limit() / static_cast<double>(c_count) <<
-            " QPS per concurrent sender)" << std::endl;
+            std::cout << "rate limit @ " << config->rate_limit() << " QPS (" << config->rate_limit() / static_cast<double>(c_count) << " QPS per concurrent sender)" << std::endl;
         }
     }
 

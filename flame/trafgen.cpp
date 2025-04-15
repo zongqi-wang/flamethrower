@@ -96,6 +96,7 @@ void TrafGen::start_tcp_session()
     assert(_tcp_session.get() == 0);
     assert(_finish_session_timer.get() == 0);
     Target current_target = _traf_config->next_target();
+    unsigned int current_port = _traf_config->next_port();
     _tcp_handle = _loop->resource<uvw::TCPHandle>(_traf_config->family);
 
     connect_tcp_events();
@@ -186,9 +187,9 @@ void TrafGen::start_tcp_session()
 
     // fires ConnectEvent when connected
     if (_traf_config->family == AF_INET) {
-        _tcp_handle->connect<uvw::IPv4>(current_target.address, _traf_config->port);
+        _tcp_handle->connect<uvw::IPv4>(current_target.address, current_port);
     } else {
-        _tcp_handle->connect<uvw::IPv6>(current_target.address, _traf_config->port);
+        _tcp_handle->connect<uvw::IPv6>(current_target.address, current_port);
     }
 }
 
