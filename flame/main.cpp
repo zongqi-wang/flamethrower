@@ -399,7 +399,7 @@ int main(int argc, char *argv[])
         }
         std::string authority(&url[parsed.field_data[UF_HOST].off], parsed.field_data[UF_HOST].len);
 
-        auto target_resolved = request->addrInfoSync(authority, args["-p"].asString());
+        auto target_resolved = request->addrInfoSync(authority, first_port_str);
         if (!target_resolved.first) {
             std::cerr << "unable to resolve target address: " << authority << std::endl;
             if (raw_target_list[i] == "file") {
